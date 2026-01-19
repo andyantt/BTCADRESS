@@ -2,192 +2,278 @@
 <html lang="zh-CN">
 <head>
   <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <title>BTC 地址交易查询 & 导出 Excel</title>
 
   <!-- SheetJS for Excel export -->
   <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 
   <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 40px;
-      background: #fafafa;
-    }
-    h1 {
-      margin-bottom: 10px;
-    }
-    textarea {
-      width: 100%;
-      height: 120px;
-      font-family: monospace;
-      margin-bottom: 10px;
-    }
-    button {
-      padding: 10px 18px;
-      font-size: 14px;
-      margin-right: 10px;
-      cursor: pointer;
-    }
-    table {
-      border-collapse: collapse;
-      width: 100%;
-      margin-top: 20px;
-      font-size: 13px;
-    }
-    th, td {
-      border: 1px solid #ccc;
-      padding: 6px 8px;
-      text-align: left;
-    }
-    th {
-      background: #eee;
-    }
-    .hint {
-      color: #666;
-      font-size: 13px;
-      margin-bottom: 10px;
-    }
+    body { font-family: Arial, sans-serif; margin: 24px; background:#fafafa; }
+    h1 { margin: 0 0 8px 0; font-size: 20px; }
+    .row { display:flex; gap:12px; flex-wrap: wrap; align-items: center; }
+    .card { background:#fff; border:1px solid #e6e6e6; border-radius:10px; padding:14px; box-shadow: 0 1px 2px rgba(0,0,0,0.04); }
+    textarea { width:100%; height:120px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; padding:10px; border:1px solid #ddd; border-radius:8px; }
+    select, button { padding:9px 12px; border-radius:8px; border:1px solid #ddd; background:#fff; cursor:pointer; }
+    button.primary { background:#111; color:#fff; border-color:#111; }
+    button:disabled { opacity:0.6; cursor:not-allowed; }
+    .hint { color:#666; font-size: 13px; line-height:1.4; margin-top:8px; }
+    .status { font-size: 13px; color:#333; }
+    .status.ok { color:#0b7a0b; }
+    .status.err { color:#b00020; }
+    table { border-collapse: collapse; width:100%; margin-top: 14px; font-size: 13px; background:#fff; }
+    th, td { border:1px solid #ddd; padding:6px 8px; text-align:left; vertical-align: top; }
+    th { background:#f2f2f2; }
+    td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    .small { font-size: 12px; color:#666; }
   </style>
 </head>
 
 <body>
+  <h1>BTC 地址交易查询（去重版）</h1>
+  <div class="small">输入地址 → 查询交易 → 导出 Excel（防重复流水）</div>
 
-<h1>BTC 地址交易查询</h1>
-<div class="hint">
-  每行一个 BTC 地址（支持 1 / 3 / bc1 开头），数据来源：Blockstream Esplora API
-</div>
+  <div class="card" style="margin-top:12px;">
+    <div class="row">
+      <label>数据源：</label>
+      <select id="provider">
+        <option value="https://blockstream.info/api">Blockstream（推荐）</option>
+        <option value="https://mempool.space/api">mempool.space</option>
+      </select>
 
-<textarea id="addresses" placeholder="bc1qxxxxxx&#10;1Axxxxx&#10;3Fxxxxx"></textarea>
+      <button id="btnQuery" class="primary" onclick="query()">查询</button>
+      <button id="btnExport" onclick="exportExcel()">导出 Excel</button>
 
-<button onclick="query()">查询</button>
-<button onclick="exportExcel()">导出 Excel</button>
+      <span id="status" class="status"></span>
+    </div>
 
-<table id="resultTable">
-  <thead>
-    <tr>
-      <th>地址</th>
-      <th>时间 (UTC)</th>
-      <th>TxID</th>
-      <th>转入 BTC</th>
-      <th>转出 BTC</th>
-      <th>手续费 BTC</th>
-      <th>当前地址余额 BTC</th>
-    </tr>
-  </thead>
-  <tbody></tbody>
-</table>
+    <div class="hint">
+      每行一个 BTC 地址（支持 1 / 3 / bc1 开头）。<br/>
+      提示：首次查询大量交易可能需要一点时间；请不要频繁快速重复点击“查询”。
+    </div>
+
+    <div style="margin-top:10px;">
+      <textarea id="addresses" placeholder="bc1qxxxxxx&#10;1Axxxxx&#10;3Fxxxxx"></textarea>
+    </div>
+  </div>
+
+  <div class="card" style="margin-top:12px;">
+    <div class="row" style="justify-content: space-between;">
+      <div class="small">结果（交易按拉取顺序展示；Excel 会导出同样内容）</div>
+      <div class="small" id="countInfo"></div>
+    </div>
+
+    <table id="resultTable">
+      <thead>
+        <tr>
+          <th>地址</th>
+          <th>时间 (UTC)</th>
+          <th>TxID</th>
+          <th>转入 BTC</th>
+          <th>转出 BTC</th>
+          <th>手续费 BTC</th>
+          <th>当前地址余额 BTC</th>
+        </tr>
+      </thead>
+      <tbody></tbody>
+    </table>
+  </div>
 
 <script>
-const API_BASE = "https://blockstream.info/api";
 let allRows = [];
+let isRunning = false;
 
-function satToBtc(sat) {
-  return (sat / 1e8).toFixed(8);
+function setStatus(msg, type="") {
+  const el = document.getElementById("status");
+  el.textContent = msg || "";
+  el.className = "status" + (type ? " " + type : "");
 }
 
+function satToBtcStr(sat) {
+  const v = (Number(sat) / 1e8);
+  // 固定 8 位小数
+  return v.toFixed(8);
+}
+
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+
 async function fetchJSON(url) {
-  const res = await fetch(url);
-  if (!res.ok) throw new Error("API 请求失败");
+  const res = await fetch(url, { cache: "no-store" });
+  if (!res.ok) {
+    const text = await res.text().catch(()=> "");
+    throw new Error(`API 请求失败：${res.status} ${res.statusText} ${text}`.slice(0, 200));
+  }
   return res.json();
 }
 
-async function query() {
-  const tbody = document.querySelector("#resultTable tbody");
-  tbody.innerHTML = "";
-  allRows = [];
-
-  const addresses = document
-    .getElementById("addresses")
-    .value
-    .split("\n")
-    .map(a => a.trim())
-    .filter(a => a);
-
-  for (const address of addresses) {
-    // 余额
-    const info = await fetchJSON(`${API_BASE}/address/${address}`);
-    const balanceSat =
-      info.chain_stats.funded_txo_sum -
-      info.chain_stats.spent_txo_sum;
-    const balanceBtc = satToBtc(balanceSat);
-
-    // 交易（只取已确认，分页）
-    let lastTxid = null;
-    while (true) {
-      const url = lastTxid
-        ? `${API_BASE}/address/${address}/txs/chain/${lastTxid}`
-        : `${API_BASE}/address/${address}/txs/chain`;
-
-      const txs = await fetchJSON(url);
-      if (txs.length === 0) break;
-
-      for (const tx of txs) {
-        let inSat = 0;
-        let outSat = 0;
-
-        for (const vout of tx.vout) {
-          if (vout.scriptpubkey_address === address) {
-            inSat += vout.value;
-          }
-        }
-
-        for (const vin of tx.vin) {
-          if (
-            vin.prevout &&
-            vin.prevout.scriptpubkey_address === address
-          ) {
-            outSat += vin.prevout.value;
-          }
-        }
-
-        const time = tx.status.confirmed
-          ? new Date(tx.status.block_time * 1000).toISOString()
-          : "";
-
-        const row = {
-          地址: address,
-          时间_UTC: time,
-          TxID: tx.txid,
-          转入_BTC: satToBtc(inSat),
-          转出_BTC: satToBtc(outSat),
-          手续费_BTC: satToBtc(tx.fee),
-          当前余额_BTC: balanceBtc
-        };
-
-        allRows.push(row);
-
-        const tr = document.createElement("tr");
-        tr.innerHTML = `
-          <td>${address}</td>
-          <td>${time}</td>
-          <td style="font-family:monospace">${tx.txid}</td>
-          <td>${satToBtc(inSat)}</td>
-          <td>${satToBtc(outSat)}</td>
-          <td>${satToBtc(tx.fee)}</td>
-          <td>${balanceBtc}</td>
-        `;
-        tbody.appendChild(tr);
-      }
-
-      lastTxid = txs[txs.length - 1].txid;
-      await new Promise(r => setTimeout(r, 200)); // 防限速
-    }
-  }
-
-  alert("查询完成");
+function normalizeAddress(s) {
+  // trim + 去零宽字符（复制粘贴常见）
+  return (s || "").trim().replace(/[\u200B-\u200D\uFEFF]/g, "");
 }
 
-function exportExcel() {
-  if (allRows.length === 0) {
-    alert("没有数据可导出");
+function parseUniqueAddresses() {
+  const rawLines = document.getElementById("addresses").value.split("\n");
+  const set = new Set();
+  for (let line of rawLines) {
+    const a = normalizeAddress(line);
+    if (a) set.add(a);
+  }
+  return Array.from(set);
+}
+
+function addRowToTable(rowObj) {
+  const tbody = document.querySelector("#resultTable tbody");
+  const tr = document.createElement("tr");
+  tr.innerHTML = `
+    <td>${rowObj["地址"]}</td>
+    <td>${rowObj["时间_UTC"]}</td>
+    <td class="mono">${rowObj["TxID"]}</td>
+    <td>${rowObj["转入_BTC"]}</td>
+    <td>${rowObj["转出_BTC"]}</td>
+    <td>${rowObj["手续费_BTC"]}</td>
+    <td>${rowObj["当前余额_BTC"]}</td>
+  `;
+  tbody.appendChild(tr);
+}
+
+async function query() {
+  if (isRunning) return;
+
+  const btnQuery = document.getElementById("btnQuery");
+  const btnExport = document.getElementById("btnExport");
+  const tbody = document.querySelector("#resultTable tbody");
+  const countInfo = document.getElementById("countInfo");
+
+  tbody.innerHTML = "";
+  allRows = [];
+  countInfo.textContent = "";
+
+  const addresses = parseUniqueAddresses();
+  if (addresses.length === 0) {
+    setStatus("请输入至少 1 个地址（每行一个）", "err");
     return;
   }
 
-  const ws = XLSX.utils.json_to_sheet(allRows);
+  const API_BASE = document.getElementById("provider").value;
+
+  // ✅ 交易去重：address|txid
+  const seenTx = new Set();
+
+  isRunning = true;
+  btnQuery.disabled = true;
+  btnExport.disabled = true;
+  setStatus(`开始查询：${addresses.length} 个地址...`, "");
+
+  try {
+    let addrIndex = 0;
+
+    for (const address of addresses) {
+      addrIndex++;
+      setStatus(`查询中 (${addrIndex}/${addresses.length})：${address}`, "");
+
+      // 1) 当前余额（confirmed）
+      const info = await fetchJSON(`${API_BASE}/address/${encodeURIComponent(address)}`);
+      const balanceSat = (info.chain_stats.funded_txo_sum - info.chain_stats.spent_txo_sum);
+      const balanceBtc = satToBtcStr(balanceSat);
+
+      // 2) 已确认交易分页：/address/:addr/txs/chain(/:last_seen_txid)
+      let lastTxid = null;
+      let page = 0;
+
+      while (true) {
+        page++;
+        const url = lastTxid
+          ? `${API_BASE}/address/${encodeURIComponent(address)}/txs/chain/${encodeURIComponent(lastTxid)}`
+          : `${API_BASE}/address/${encodeURIComponent(address)}/txs/chain`;
+
+        const txs = await fetchJSON(url);
+        if (!Array.isArray(txs) || txs.length === 0) break;
+
+        for (const tx of txs) {
+          const txid = tx.txid;
+          const key = `${address}|${txid}`;
+          if (seenTx.has(key)) continue;     // ✅ 防重复
+          seenTx.add(key);
+
+          let inSat = 0;
+          let outSat = 0;
+
+          // 转入：vout 里本地址的 value
+          for (const vout of (tx.vout || [])) {
+            if (vout.scriptpubkey_address === address) inSat += Number(vout.value || 0);
+          }
+
+          // 转出：vin.prevout 里本地址的 value
+          for (const vin of (tx.vin || [])) {
+            if (vin.prevout && vin.prevout.scriptpubkey_address === address) {
+              outSat += Number(vin.prevout.value || 0);
+            }
+          }
+
+          const timeUtc = (tx.status && tx.status.confirmed)
+            ? new Date(tx.status.block_time * 1000).toISOString()
+            : "";
+
+          const row = {
+            "地址": address,
+            "时间_UTC": timeUtc,
+            "TxID": txid,
+            "转入_BTC": satToBtcStr(inSat),
+            "转出_BTC": satToBtcStr(outSat),
+            "手续费_BTC": satToBtcStr(tx.fee || 0),
+            "当前余额_BTC": balanceBtc
+          };
+
+          allRows.push(row);
+          addRowToTable(row);
+        }
+
+        lastTxid = txs[txs.length - 1].txid;
+
+        // 防止限速：每页稍微歇一下
+        await sleep(180);
+      }
+
+      countInfo.textContent = `已收集：${allRows.length} 行（已自动去重）`;
+      await sleep(120);
+    }
+
+    setStatus(`完成：共 ${allRows.length} 行（已去重）`, "ok");
+  } catch (e) {
+    console.error(e);
+    setStatus(String(e.message || e), "err");
+  } finally {
+    isRunning = false;
+    btnQuery.disabled = false;
+    btnExport.disabled = false;
+  }
+}
+
+function exportExcel() {
+  if (!allRows || allRows.length === 0) {
+    setStatus("没有数据可导出：请先点击查询", "err");
+    return;
+  }
+
+  // 再做一次保险去重（万无一失）
+  const uniq = [];
+  const seen = new Set();
+  for (const r of allRows) {
+    const key = `${r["地址"]}|${r["TxID"]}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    uniq.push(r);
+  }
+
+  const ws = XLSX.utils.json_to_sheet(uniq);
   const wb = XLSX.utils.book_new();
   XLSX.utils.book_append_sheet(wb, ws, "BTC交易记录");
 
-  XLSX.writeFile(wb, "btc_address_report.xlsx");
+  const now = new Date();
+  const stamp = now.toISOString().slice(0,19).replace(/[:T]/g,"-");
+  XLSX.writeFile(wb, `btc_address_report_${stamp}.xlsx`);
+
+  setStatus(`已导出 Excel（${uniq.length} 行，已去重）`, "ok");
 }
 </script>
 
