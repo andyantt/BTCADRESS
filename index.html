@@ -24,14 +24,14 @@
     table { border-collapse: collapse; width:100%; margin-top: 14px; font-size: 13px; background:#fff; }
     th, td { border:1px solid #ddd; padding:6px 8px; text-align:left; vertical-align: top; }
     th { background:#f2f2f2; }
-    td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+    td.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; word-break: break-all; }
     .small { font-size: 12px; color:#666; }
   </style>
 </head>
 
 <body>
-  <h1>BTC 地址交易查询（去重版）</h1>
-  <div class="small">输入地址 → 查询交易 → 导出 Excel（防重复流水）</div>
+  <h1>BTC 地址交易查询（去重 + 对手方地址）</h1>
+  <div class="small">输入地址 → 查询交易 → 导出 Excel（自动去重，展示对手方地址）</div>
 
   <div class="card" style="margin-top:12px;">
     <div class="row">
@@ -49,7 +49,7 @@
 
     <div class="hint">
       每行一个 BTC 地址（支持 1 / 3 / bc1 开头）。<br/>
-      提示：首次查询大量交易可能需要一点时间；请不要频繁快速重复点击“查询”。
+      对手方地址规则：净流入取 inputs（排除自己）；净流出取 outputs（排除自己）。一笔交易可能有多个对手方地址（最多展示 5 个）。
     </div>
 
     <div style="margin-top:10px;">
@@ -69,10 +69,11 @@
           <th>地址</th>
           <th>时间 (UTC)</th>
           <th>TxID</th>
+          <th>对手方地址</th>
           <th>转入 BTC</th>
           <th>转出 BTC</th>
           <th>手续费 BTC</th>
-          <th>当前地址余额 BTC</th>
+          <th>当前余额（查询时）BTC</th>
         </tr>
       </thead>
       <tbody></tbody>
@@ -91,7 +92,6 @@ function setStatus(msg, type="") {
 
 function satToBtcStr(sat) {
   const v = (Number(sat) / 1e8);
-  // 固定 8 位小数
   return v.toFixed(8);
 }
 
@@ -101,7 +101,7 @@ async function fetchJSON(url) {
   const res = await fetch(url, { cache: "no-store" });
   if (!res.ok) {
     const text = await res.text().catch(()=> "");
-    throw new Error(`API 请求失败：${res.status} ${res.statusText} ${text}`.slice(0, 200));
+    throw new Error(`API 请求失败：${res.status} ${res.statusText} ${text}`.slice(0, 220));
   }
   return res.json();
 }
@@ -128,10 +128,11 @@ function addRowToTable(rowObj) {
     <td>${rowObj["地址"]}</td>
     <td>${rowObj["时间_UTC"]}</td>
     <td class="mono">${rowObj["TxID"]}</td>
+    <td class="mono">${rowObj["对手方地址"] || ""}</td>
     <td>${rowObj["转入_BTC"]}</td>
     <td>${rowObj["转出_BTC"]}</td>
     <td>${rowObj["手续费_BTC"]}</td>
-    <td>${rowObj["当前余额_BTC"]}</td>
+    <td>${rowObj["当前余额（查询时）BTC"]}</td>
   `;
   tbody.appendChild(tr);
 }
@@ -178,10 +179,8 @@ async function query() {
 
       // 2) 已确认交易分页：/address/:addr/txs/chain(/:last_seen_txid)
       let lastTxid = null;
-      let page = 0;
 
       while (true) {
-        page++;
         const url = lastTxid
           ? `${API_BASE}/address/${encodeURIComponent(address)}/txs/chain/${encodeURIComponent(lastTxid)}`
           : `${API_BASE}/address/${encodeURIComponent(address)}/txs/chain`;
@@ -198,17 +197,35 @@ async function query() {
           let inSat = 0;
           let outSat = 0;
 
-          // 转入：vout 里本地址的 value
-          for (const vout of (tx.vout || [])) {
-            if (vout.scriptpubkey_address === address) inSat += Number(vout.value || 0);
+          const fromSet = new Set(); // inputs 的地址集合
+          const toSet = new Set();   // outputs 的地址集合
+
+          // inputs：统计输入地址集合 + 从本地址花出去的金额
+          for (const vin of (tx.vin || [])) {
+            const prev = vin.prevout;
+            const a = prev && prev.scriptpubkey_address;
+            if (a) fromSet.add(a);
+            if (a === address) outSat += Number(prev.value || 0);
           }
 
-          // 转出：vin.prevout 里本地址的 value
-          for (const vin of (tx.vin || [])) {
-            if (vin.prevout && vin.prevout.scriptpubkey_address === address) {
-              outSat += Number(vin.prevout.value || 0);
-            }
+          // outputs：统计输出地址集合 + 转入本地址的金额
+          for (const vout of (tx.vout || [])) {
+            const a = vout.scriptpubkey_address;
+            if (a) toSet.add(a);
+            if (a === address) inSat += Number(vout.value || 0);
           }
+
+          // 对手方地址：净流入取 inputs；净流出取 outputs（都排除自己）
+          const net = inSat - outSat;
+          const counterpartSet = new Set();
+
+          if (net >= 0) {
+            for (const a of fromSet) if (a !== address) counterpartSet.add(a);
+          } else {
+            for (const a of toSet) if (a !== address) counterpartSet.add(a);
+          }
+
+          const counterpart = Array.from(counterpartSet).slice(0, 5).join(", ");
 
           const timeUtc = (tx.status && tx.status.confirmed)
             ? new Date(tx.status.block_time * 1000).toISOString()
@@ -218,10 +235,11 @@ async function query() {
             "地址": address,
             "时间_UTC": timeUtc,
             "TxID": txid,
+            "对手方地址": counterpart,
             "转入_BTC": satToBtcStr(inSat),
             "转出_BTC": satToBtcStr(outSat),
             "手续费_BTC": satToBtcStr(tx.fee || 0),
-            "当前余额_BTC": balanceBtc
+            "当前余额（查询时）BTC": balanceBtc
           };
 
           allRows.push(row);
@@ -255,7 +273,7 @@ function exportExcel() {
     return;
   }
 
-  // 再做一次保险去重（万无一失）
+  // 再做一次保险去重（address|txid）
   const uniq = [];
   const seen = new Set();
   for (const r of allRows) {
